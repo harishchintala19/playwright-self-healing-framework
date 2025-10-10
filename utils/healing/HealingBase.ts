@@ -124,6 +124,11 @@ export class HealingBase {
         : [scoredElements[0]];
 
       for (const match of filteredElements) {
+        if (match.score < HealingUtils.MIN_HEALING_THRESHOLD) {
+          this.log(`[HEALING SKIPPED] Low confidence (score: ${match.score.toFixed(3)}) for selector "${selector}"`);
+          continue;
+        }
+
         const healedSelector = HealingMatcher.generateSelectorFromSignature(match.signature);
         const healedLocator = this.normalizeLocator(healedSelector).first();
         try {

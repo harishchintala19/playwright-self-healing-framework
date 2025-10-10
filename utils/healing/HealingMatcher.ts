@@ -11,9 +11,7 @@ export class HealingMatcher {
     const attrRegex = /@([\w-]+)=['"]?([^'"[\]]+)['"]?/;
     const containsRegex = /contains\(@([\w-]+),'([^']+)'\)/;
     const startsWithRegex = /starts-with\(@([\w-]+),'([^']+)'\)/;
-
     const textRegex = /normalize-space\(\)\s*=\s*['"]([^'"]+)['"]|text\(\)\s*=\s*['"]([^'"]+)['"]/;
-
     const tagRegex = /\/\/(\w+)/;
 
     const attrMatch = attrRegex.exec(selector);
@@ -22,14 +20,19 @@ export class HealingMatcher {
     const textMatch = textRegex.exec(selector);
     const tagMatch = tagRegex.exec(selector);
 
-    if (attrMatch) return { type: attrMatch[1].toLowerCase(), value: attrMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
-    if (containsMatch) return { type: containsMatch[1].toLowerCase(), value: containsMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
-    if (startsWithMatch) return { type: startsWithMatch[1].toLowerCase(), value: startsWithMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
-    if (textMatch) return { type: "text", value: (textMatch[1] || textMatch[2]).toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+    if (attrMatch)
+      return { type: attrMatch[1].toLowerCase(), value: attrMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+    if (containsMatch)
+      return { type: containsMatch[1].toLowerCase(), value: containsMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+    if (startsWithMatch)
+      return { type: startsWithMatch[1].toLowerCase(), value: startsWithMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+    if (textMatch)
+      return { type: "text", value: (textMatch[1] || textMatch[2]).toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
     if (tagMatch) return { type: "tagName", value: tagMatch[1].toLowerCase() };
 
     const genericAttrMatch = /\[([\w-]+)=['"]?([^'"\]]+)['"]?\]/.exec(selector);
-    if (genericAttrMatch) return { type: genericAttrMatch[1].toLowerCase(), value: genericAttrMatch[2].toLowerCase() };
+    if (genericAttrMatch)
+      return { type: genericAttrMatch[1].toLowerCase(), value: genericAttrMatch[2].toLowerCase() };
 
     return { type: "unknown", value: HealingUtils.normalizeSelector(selector) };
   }
@@ -38,25 +41,48 @@ export class HealingMatcher {
     let maxScore = 0;
 
     const scoringFunctions: Array<() => number> = [
-      () => (type === "id" && signature.id ? HealingUtils.calculateStringScore(HealingUtils.normalizeDynamicId(value), HealingUtils.normalizeDynamicId(signature.id)) : 0),
+      () =>
+        type === "id" && signature.id
+          ? HealingUtils.calculateStringScore(
+              HealingUtils.normalizeDynamicId(value),
+              HealingUtils.normalizeDynamicId(signature.id)
+            )
+          : 0,
 
-      () => (type === "name" && signature.name ? HealingUtils.calculateStringScore(HealingUtils.normalizeDynamicId(value), HealingUtils.normalizeDynamicId(signature.name)) * 0.9 : 0),
+      () =>
+        type === "name" && signature.name
+          ? HealingUtils.calculateStringScore(
+              HealingUtils.normalizeDynamicId(value),
+              HealingUtils.normalizeDynamicId(signature.name)
+            ) * 0.9
+          : 0,
 
       () => {
         if (type === "class" && signature.className) {
-          const classVal = Array.isArray(signature.className) ? signature.className[0] : signature.className.split(" ")[0];
-          return classVal ? HealingUtils.calculateStringScore(HealingUtils.normalizeDynamicId(value), HealingUtils.normalizeDynamicId(classVal)) * 0.8 : 0;
+          const classVal = Array.isArray(signature.className)
+            ? signature.className[0]
+            : signature.className.split(" ")[0];
+          return classVal
+            ? HealingUtils.calculateStringScore(
+                HealingUtils.normalizeDynamicId(value),
+                HealingUtils.normalizeDynamicId(classVal)
+              ) * 0.8
+            : 0;
         }
         return 0;
       },
 
-      () => (tagName && signature.tagName ? HealingUtils.calculateStringScore(value, signature.tagName) * 0.7 : 0),
+      () =>
+        tagName && signature.tagName
+          ? HealingUtils.calculateStringScore(value, signature.tagName) * 0.7
+          : 0,
 
       () => {
         if (signature.attributes && type) {
           return Object.entries(signature.attributes).reduce((acc, [attrName, attrValue]) => {
             if (attrName.toLowerCase() === type) {
-              const score = HealingUtils.calculateStringScore(value, attrValue.toLowerCase()) * 0.9;
+              const score =
+                HealingUtils.calculateStringScore(value, attrValue.toLowerCase()) * 0.9;
               return Math.max(acc, score);
             }
             return acc;
@@ -65,9 +91,15 @@ export class HealingMatcher {
         return 0;
       },
 
-      () => (type === "text" && signature.textContent ? HealingUtils.calculateStringScore(value, signature.textContent.toLowerCase()) * 1.0 : 0),
+      () =>
+        type === "text" && signature.textContent
+          ? HealingUtils.calculateStringScore(value, signature.textContent.toLowerCase()) * 1.0
+          : 0,
 
-      () => (signature.textContent ? HealingUtils.calculateStringScore(value, signature.textContent.toLowerCase()) * 0.6 : 0),
+      () =>
+        signature.textContent
+          ? HealingUtils.calculateStringScore(value, signature.textContent.toLowerCase()) * 0.6
+          : 0,
     ];
 
     for (const fn of scoringFunctions) {
@@ -80,7 +112,29 @@ export class HealingMatcher {
 
   static calculateSimilarity(selector: string, signature: ElementSignature): number {
     const selectorInfo = this.extractSelectorInfo(selector);
-    return this.scoreByAttribute(selectorInfo.type, selectorInfo.value, signature, selectorInfo.tagName);
+    let score = this.scoreByAttribute(selectorInfo.type, selectorInfo.value, signature, selectorInfo.tagName);
+
+    if (score < HealingUtils.MIN_HEALING_THRESHOLD && !selector.includes("//") && !selector.includes("=")) {
+      const normalized = HealingUtils.normalizeDynamicId(selector);
+      const candidates = [
+        signature.id,
+        signature.name,
+        signature.attributes?.["data-test"],
+        signature.attributes?.["data-testid"],
+        signature.attributes?.["placeholder"],
+        signature.attributes?.["aria-label"],
+      ].filter(Boolean) as string[];
+
+      for (const attrVal of candidates) {
+        const attrScore = HealingUtils.calculateStringScore(
+          normalized,
+          HealingUtils.normalizeDynamicId(attrVal)
+        );
+        if (attrScore > score) score = attrScore;
+      }
+    }
+
+    return score;
   }
 
   static generateSelectorFromSignature(signature: ElementSignature): string {
@@ -101,4 +155,3 @@ export class HealingMatcher {
     return signature.tagName || "*";
   }
 }
-
