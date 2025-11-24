@@ -140,7 +140,7 @@ export class HealingActions {
                   return isValid ? opt : null;
                 })
               )
-            ).filter((opt): opt is Locator => opt !== null);
+            ).filter((opt): opt is Locator => opt !== null);  
 
             if (!validOptions.length) throw new Error("No valid options found");
 

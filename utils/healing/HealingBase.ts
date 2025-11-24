@@ -7,8 +7,11 @@ import { HealingOptions } from "./HealingTypes";
 
 export class HealingBase {
   protected page: Page;
-  private readonly healingCache: Map<string, string> = new Map();
+  private readonly healingCache = new Map<string, string>();
   heal: HealingActions["actions"];
+
+  private static readonly SHORT_TIMEOUT = 1000;
+  private static readonly MEDIUM_TIMEOUT = 2000;
 
   constructor(page: Page) {
     this.page = page;
@@ -21,27 +24,85 @@ export class HealingBase {
     ).actions;
   }
 
-  private log(message: string) {
-    console.log(message);
+  private log(message: string): void {
+    console.log(`[HEALING LOG] ${message}`);
+  }
+
+  private async sanitizeSelectorAsync(selector: string): Promise<string> {
+    const original = selector.trim();
+    let fixed = this.correctBasicXPathSyntax(original);
+    fixed = this.ensureValidXPathPrefix(fixed);
+    fixed = this.makeContainsCaseInsensitive(fixed);
+
+    fixed = fixed.replaceAll(/\s{2,}/g, " ").trim();
+
+    fixed = await this.inferTagFromDOMIfNeeded(fixed);
+    if (fixed !== original) {
+      this.log(`[SANITIZED LOCATOR FIXED] Original: "${original}" → Sanitized: "${fixed}"`);
+    }
+
+    return fixed;
+  }
+
+  private correctBasicXPathSyntax(selector: string): string {
+    return selector
+      .replaceAll(/\[([a-zA-Z_][a-zA-Z0-9_-]*)=/g, "[@$1=")
+      .replaceAll(/^\/\/\[@/g, "//*[@")
+      .replaceAll(/^\/\/\[/g, "//*[")
+      .replaceAll(/contains\((\w+),/g, "contains(@$1,")
+      .replaceAll(/starts-with\((\w+),/g, "starts-with(@$1,");
+  }
+
+
+  private ensureValidXPathPrefix(selector: string): string {
+    if (!selector.startsWith("//") && !selector.startsWith("xpath=")) {
+      return `//${selector}`;
+    }
+    return selector;
+  }
+
+  private makeContainsCaseInsensitive(selector: string): string {
+    return selector.replaceAll(
+      /(contains|starts-with)\(\s*(?:@([a-zA-Z0-9:_-]+)|text\(\))\s*,\s*'([^']+)'\s*\)/gi,
+      (_, fn, attr, val) => {
+        const lowerVal = val.toLowerCase();
+        const translateFn = "translate(";
+        const alphabets = "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'";
+        return attr
+          ? `${fn}(${translateFn}@${attr},${alphabets}),'${lowerVal}')`
+          : `${fn}(${translateFn}text(),${alphabets}),'${lowerVal}')`;
+      }
+    );
+  }
+
+  private async inferTagFromDOMIfNeeded(selector: string): Promise<string> {
+    if (!selector.startsWith("//*") && !selector.startsWith("//*[@")) return selector;
+
+    const attrMatch = selector.match(/@\w+='([^']+)'/);
+    const attrValue = attrMatch ? attrMatch[1] : null;
+    if (!attrValue) return selector;
+
+    const tagCandidates = ["input", "button", "select", "textarea", "a", "label", "div", "span"];
+
+    for (const tag of tagCandidates) {
+      try {
+        const locator = this.page.locator(`${tag}[id='${attrValue}'], ${tag}[name='${attrValue}']`);
+        if (await locator.first().isVisible()) {
+          const improved = selector.replaceAll("//*", `//${tag}`);
+          if (improved !== selector) {
+            this.log(`[SANITIZED LOCATOR IMPROVED] Tag inferred from DOM: "${tag}" → "${improved}"`);
+            return improved;
+          }
+          break;
+        }
+      } catch {
+      }
+    }
+    return selector;
   }
 
   private sanitizeSelector(selector: string): string {
-    const original = selector.trim();
-
-    if (original.startsWith("//[")) selector = original.replace("//[", "//*[");
-    else if (original.startsWith("//[@")) selector = original.replace("//[@", "//*[@");
-    else selector = original.replace(/^\/\/\s*\[/, "//*[");
-
-    const sanitized = selector.replace(
-      /(contains|starts-with)\(\s*(?:@([a-zA-Z0-9:_-]+)|text\(\))\s*,\s*'([^']+)'\s*\)/gi,
-      (_, fn, attr, val) => {
-        if (attr)
-          return `${fn}(translate(@${attr},'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'${val.toLowerCase()}')`;
-        return `${fn}(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'${val.toLowerCase()}')`;
-      }
-    );
-
-    return sanitized;
+    return this.ensureValidXPathPrefix(this.correctBasicXPathSyntax(selector.trim()));
   }
 
   private isXPath(selector: string): boolean {
@@ -56,9 +117,8 @@ export class HealingBase {
           ? `xpath=${sanitized}`
           : sanitized;
       return this.page.locator(xpathLocator);
-    } else {
-      return locator;
     }
+    return locator;
   }
 
   private async isInteractable(el: Locator): Promise<boolean> {
@@ -72,79 +132,94 @@ export class HealingBase {
     }
   }
 
+  private async tryDirectLocator(selector: string, timeout: number): Promise<Locator | null> {
+    const literalElement = this.page.locator(selector);
+    try {
+      await literalElement.first().waitFor({ state: "visible", timeout: Math.min(timeout, HealingBase.SHORT_TIMEOUT) });
+      return literalElement.first();
+    } catch {
+      this.log(`[ORIGINAL LOCATOR FAILED] "${selector}"`);
+      const sanitizedSelector = await this.sanitizeSelectorAsync(selector);
+      const sanitizedElement = this.page.locator(sanitizedSelector);
+      try {
+        await sanitizedElement.first().waitFor({ state: "visible", timeout: Math.min(timeout, HealingBase.SHORT_TIMEOUT) });
+        this.log(`[SANITIZED LOCATOR APPLIED] Using improved version: "${sanitizedSelector}"\n`);
+        return sanitizedElement.first();
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  private async tryCachedLocator(selector: string, timeout: number): Promise<Locator | null> {
+    const cachedSelector = this.healingCache.get(selector);
+    if (!cachedSelector) return null;
+
+    const cachedLocator = this.page.locator(cachedSelector);
+    try {
+      await cachedLocator.waitFor({ state: "visible", timeout: Math.min(timeout, HealingBase.SHORT_TIMEOUT) });
+      const firstLocator = cachedLocator.first();
+      if ((await cachedLocator.count()) > 0 && (await firstLocator.isEnabled())) {
+        this.log(`[CACHED HEAL USED] Cached healed selector: "${cachedSelector}"`);
+        return firstLocator;
+      }
+      this.log(`[CACHED HEAL INVALID] "${cachedSelector}" - Removed from cache`);
+    } catch {
+      this.log(`[CACHED HEAL BROKEN] "${cachedSelector}" - Removed from cache\n`);
+    }
+    this.healingCache.delete(selector);
+    return null;
+  }
+
+  private async findBestCandidate(selector: string, contextSelector: string, timeout: number): Promise<Locator> {
+    this.log(`[HEALING ATTEMPT] Searching alternative for "${selector}"`);
+    const elementSignatures = await HealingCollector.searchCandidatesAdvanced(this.page, contextSelector);
+
+    if (elementSignatures.length === 0) {
+      throw new Error(`Healing failed: No candidates found for "${selector}"`);
+    }
+
+    const scoredElements = elementSignatures
+      .map((signature) => ({ signature, score: HealingMatcher.calculateSimilarity(selector, signature) }))
+      .sort((a, b) => b.score - a.score);
+
+    const hasHighConfidence = scoredElements.some((e) => e.score >= HealingUtils.MIN_HEALING_THRESHOLD);
+    const filteredElements = hasHighConfidence
+      ? scoredElements.filter((e) => e.score >= HealingUtils.MIN_HEALING_THRESHOLD)
+      : [scoredElements[0]];
+
+    for (const match of filteredElements) {
+      if (match.score < HealingUtils.MIN_HEALING_THRESHOLD) {
+        this.log(`[LOW CONFIDENCE SKIP] "${selector}" - Confidence too low (${match.score.toFixed(3)})`);
+        continue;
+      }
+
+      const healedSelector = HealingMatcher.generateSelectorFromSignature(match.signature);
+      const healedLocator = this.page.locator(healedSelector);
+
+      try {
+        await healedLocator.first().waitFor({ state: "visible", timeout: Math.min(timeout, HealingBase.MEDIUM_TIMEOUT) });
+        if (await this.isInteractable(healedLocator.first())) {
+          this.healingCache.set(selector, healedSelector);
+          this.log(`[HEALED SUCCESS] Original locator broken → Using healed locator: "${healedSelector}"`);
+          this.log(`[HEALED DETAILS] Tag: ${match.signature.tagName} | Confidence Score: ${match.score.toFixed(3)}\n`);
+          return healedLocator.first();
+        }
+      } catch {
+      }
+    }
+
+    throw new Error(`[HEALING FAILED COMPLETELY] "${selector}"`);
+  }
+
   private async getHealingLocator(selector: string, options: HealingOptions = {}): Promise<Locator> {
     const { contextSelector = HealingUtils.DEFAULT_CONTEXT_SELECTOR, timeout = HealingUtils.DEFAULT_TIMEOUT } = options;
 
-    const tryDirectLocator = async (): Promise<Locator | null> => {
-      const literalElement = this.page.locator(selector);
-      try {
-        await literalElement.first().waitFor({ state: "visible", timeout: Math.min(timeout, 1000) });
-        this.log(`[ORIGINAL LOCATOR] "${selector}" - Passed`);
-        return literalElement.first();
-      } catch {
-        this.log(`[ORIGINAL LOCATOR] "${selector}" - Broken`);
-        
-        const sanitizedElement = this.normalizeLocator(selector);
-        try {
-          await sanitizedElement.first().waitFor({ state: "visible", timeout: Math.min(timeout, 1000) });
-          this.log(`[SANITIZED LOCATOR] "${selector}" - Used`);
-          return sanitizedElement.first();
-        } catch {
-          return null;
-        }
-      }
-    };
-
-    const tryCachedLocator = async (): Promise<Locator | null> => {
-      if (!this.healingCache.has(selector)) return null;
-      const cachedSelector = this.healingCache.get(selector)!;
-      const cachedLocator = this.normalizeLocator(cachedSelector);
-      try {
-        await cachedLocator.waitFor({ state: "visible", timeout: Math.min(timeout, 1000) });
-        if ((await cachedLocator.count()) > 0 && (await cachedLocator.first().isEnabled())) {
-          this.log(`[HEALING] Using cached selector → "${cachedSelector}"`);
-          return cachedLocator.first();
-        } else this.healingCache.delete(selector);
-      } catch {
-        this.healingCache.delete(selector);
-      }
-      return null;
-    };
-
-    const findBestCandidate = async (): Promise<Locator> => {
-      const elementSignatures = await HealingCollector.searchCandidatesAdvanced(this.page, contextSelector);
-      if (!elementSignatures.length) throw new Error(`Healing failed for selector: "${selector}"`);
-
-      const scoredElements = elementSignatures
-        .map((signature) => ({ signature, score: HealingMatcher.calculateSimilarity(selector, signature) }))
-        .sort((a, b) => b.score - a.score);
-
-      const filteredElements = scoredElements.filter((e) => e.score >= HealingUtils.MIN_HEALING_THRESHOLD).length
-        ? scoredElements.filter((e) => e.score >= HealingUtils.MIN_HEALING_THRESHOLD)
-        : [scoredElements[0]];
-
-      for (const match of filteredElements) {
-        if (match.score < HealingUtils.MIN_HEALING_THRESHOLD) {
-          this.log(`[HEALING SKIPPED] Low confidence (score: ${match.score.toFixed(3)}) for selector "${selector}"`);
-          continue;
-        }
-
-        const healedSelector = HealingMatcher.generateSelectorFromSignature(match.signature);
-        const healedLocator = this.normalizeLocator(healedSelector).first();
-        try {
-          await healedLocator.waitFor({ state: "visible", timeout: Math.min(timeout, 2000) });
-          if (await this.isInteractable(healedLocator)) {
-            this.healingCache.set(selector, healedSelector);
-            this.log(`[HEALING] Match found → "${healedSelector}", tag: ${match.signature.tagName}, score: ${match.score.toFixed(3)}`);
-            return healedLocator;
-          }
-        } catch { continue; }
-      }
-
-      throw new Error(`Healing failed for selector: "${selector}"`);
-    };
-
-    return (await tryDirectLocator()) ?? (await tryCachedLocator()) ?? (await findBestCandidate());
+    return (
+      (await this.tryDirectLocator(selector, timeout)) ??
+      (await this.tryCachedLocator(selector, timeout)) ??
+      (await this.findBestCandidate(selector, contextSelector, timeout))
+    );
   }
 
   protected async safeAction<T>(
@@ -153,15 +228,15 @@ export class HealingBase {
     options?: HealingOptions
   ): Promise<T | null> {
     try {
-      const result = await action();
-      this.log(`[SUCCESS] ${methodName}\n`);
-      return result;
-    } catch (err: any) {
+      return await action();
+    } catch (err: unknown) {
+      const error = err as Error;
       if (options?.suppressError) {
-        this.log(`[ACTION FAILURE SUPPRESSED] ${methodName}\n`);
+        this.log(`[ACTION FAILURE SUPPRESSED] ${methodName}`);
         return null;
       }
-      throw err;
+      this.log(`[ACTION FAILED] ${methodName} -> ${error.message}`);
+      throw error;
     }
   }
 }

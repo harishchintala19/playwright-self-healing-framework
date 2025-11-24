@@ -2,32 +2,61 @@ import { ElementSignature } from "./HealingTypes";
 import { HealingUtils } from "./HealingUtils";
 
 export class HealingMatcher {
-  static extractSelectorInfo(selector: string): { type: string; value: string; tagName?: string } {
+  static setLogger(arg0: (message: string) => void) {
+    throw new Error("Method not implemented.");
+  }
+  static extractSelectorInfo(selector: string): {
+    type?: string;
+    value?: string;
+    tagName?: string;
+    conditions?: Array<{ type: string; value: string; tagName?: string }>;
+  } {
     selector = selector.trim();
 
     if (selector.startsWith("#")) return { type: "id", value: selector.substring(1).toLowerCase() };
     if (selector.startsWith(".")) return { type: "class", value: selector.substring(1).toLowerCase() };
 
+    const tagMatch = selector.match(/\/\/(\w+)/);
+    const tagName = tagMatch ? tagMatch[1].toLowerCase() : undefined;
+
+    const attrMatches = [...selector.matchAll(/@([\w-]+)\s*=\s*['"]([^'"]+)['"]/g)];
+    const containsMatches = [...selector.matchAll(/contains\(@([\w-]+),'([^']+)'\)/g)];
+    const startsWithMatches = [...selector.matchAll(/starts-with\(@([\w-]+),'([^']+)'\)/g)];
+    const textMatches = [...selector.matchAll(/text\(\)\s*=\s*['"]([^'"]+)['"]/g)];
+
+    const multiConditions: Array<{ type: string; value: string; tagName?: string }> = [];
+
+    for (const m of attrMatches)
+      multiConditions.push({ type: m[1].toLowerCase(), value: m[2].toLowerCase(), tagName });
+    for (const m of containsMatches)
+      multiConditions.push({ type: m[1].toLowerCase(), value: m[2].toLowerCase(), tagName });
+    for (const m of startsWithMatches)
+      multiConditions.push({ type: m[1].toLowerCase(), value: m[2].toLowerCase(), tagName });
+    for (const m of textMatches)
+      multiConditions.push({ type: "text", value: m[1].toLowerCase(), tagName });
+
+    if (multiConditions.length > 1) {
+      return { conditions: multiConditions, tagName };
+    }
+
     const attrRegex = /@([\w-]+)=['"]?([^'"[\]]+)['"]?/;
     const containsRegex = /contains\(@([\w-]+),'([^']+)'\)/;
     const startsWithRegex = /starts-with\(@([\w-]+),'([^']+)'\)/;
     const textRegex = /normalize-space\(\)\s*=\s*['"]([^'"]+)['"]|text\(\)\s*=\s*['"]([^'"]+)['"]/;
-    const tagRegex = /\/\/(\w+)/;
 
     const attrMatch = attrRegex.exec(selector);
     const containsMatch = containsRegex.exec(selector);
     const startsWithMatch = startsWithRegex.exec(selector);
     const textMatch = textRegex.exec(selector);
-    const tagMatch = tagRegex.exec(selector);
 
     if (attrMatch)
-      return { type: attrMatch[1].toLowerCase(), value: attrMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+      return { type: attrMatch[1].toLowerCase(), value: attrMatch[2].toLowerCase(), tagName };
     if (containsMatch)
-      return { type: containsMatch[1].toLowerCase(), value: containsMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+      return { type: containsMatch[1].toLowerCase(), value: containsMatch[2].toLowerCase(), tagName };
     if (startsWithMatch)
-      return { type: startsWithMatch[1].toLowerCase(), value: startsWithMatch[2].toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+      return { type: startsWithMatch[1].toLowerCase(), value: startsWithMatch[2].toLowerCase(), tagName };
     if (textMatch)
-      return { type: "text", value: (textMatch[1] || textMatch[2]).toLowerCase(), tagName: tagMatch?.[1]?.toLowerCase() };
+      return { type: "text", value: (textMatch[1] || textMatch[2]).toLowerCase(), tagName };
     if (tagMatch) return { type: "tagName", value: tagMatch[1].toLowerCase() };
 
     const genericAttrMatch = /\[([\w-]+)=['"]?([^'"\]]+)['"]?\]/.exec(selector);
@@ -112,7 +141,15 @@ export class HealingMatcher {
 
   static calculateSimilarity(selector: string, signature: ElementSignature): number {
     const selectorInfo = this.extractSelectorInfo(selector);
-    let score = this.scoreByAttribute(selectorInfo.type, selectorInfo.value, signature, selectorInfo.tagName);
+
+    if (selectorInfo.conditions && selectorInfo.conditions.length > 0) {
+      const scores = selectorInfo.conditions.map(cond =>
+        this.scoreByAttribute(cond.type, cond.value, signature, cond.tagName)
+      );
+      return scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+    }
+
+    let score = this.scoreByAttribute(selectorInfo.type!, selectorInfo.value!, signature, selectorInfo.tagName);
 
     if (score < HealingUtils.MIN_HEALING_THRESHOLD && !selector.includes("//") && !selector.includes("=")) {
       const normalized = HealingUtils.normalizeDynamicId(selector);

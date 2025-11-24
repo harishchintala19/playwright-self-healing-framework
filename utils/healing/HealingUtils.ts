@@ -3,25 +3,26 @@ import * as stringSimilarity from "string-similarity";
 export class HealingUtils {
   static readonly SIGNATURE_ATTRIBUTES: string[] = [
     "data-test", "data-testid", "data-qa", "data-cy", "data-automation-id",
-    "aria-label", "aria-labelledby", "aria-describedby", "role","id", "name",
-    "class","title", "alt", "placeholder", "value", "type", "for", "href",
-    "src","checked", "disabled", "readonly", "selected", "required",
+    "aria-label", "aria-labelledby", "aria-describedby", "role", "id", "name",
+    "class", "title", "alt", "placeholder", "value", "type", "for", "href",
+    "src", "checked", "disabled", "readonly", "selected", "required",
     "aria-expanded", "aria-hidden", "aria-checked"
   ];
 
   static readonly DEFAULT_CONTEXT_SELECTOR: string = "*";
   static readonly MIN_HEALING_THRESHOLD: number = 0.4;
   static readonly DEFAULT_TIMEOUT: number = 5000;
+
   static normalizeDynamicId(value: string): string {
-    return value.replace(/[-_\d]+/g, "").toLowerCase();
+    return value.replaceAll(/[-_\d]+/g, "").toLowerCase();
   }
 
   static normalizeSelector(selector: string): string {
     return selector
-      .replace(/(text=|role=|css=|xpath=)/gi, "")
-      .replace(/[[\]@=/*"'():{}]/g, " ")  
-      .replace(/[-_\\d]+/g, "")           
-      .replace(/\s+/g, " ")               
+      .replaceAll(/(text=|role=|css=|xpath=)/gi, "")
+      .replaceAll(/[[\]@=/*"'():{}]/g, " ")  
+      .replaceAll(/[-_\\d]+/g, "")            
+      .replaceAll(/\s+/g, " ")                
       .toLowerCase()
       .trim();
   }
@@ -30,7 +31,7 @@ export class HealingUtils {
     target = target.toLowerCase();
     candidate = candidate.toLowerCase();
 
-    if (target === candidate) return 1.0;
+    if (target === candidate) return 1;
 
     if (target.includes(candidate) || candidate.includes(target)) {
       const longer = target.length > candidate.length ? target : candidate;
